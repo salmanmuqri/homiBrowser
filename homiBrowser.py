@@ -2,18 +2,26 @@ import sys
 import sqlite3
 import os
 from datetime import datetime
-from PyQt5.QtWidgets import QHBoxLayout, QMessageBox
+from PyQt5.QtWidgets import (QHBoxLayout, QMessageBox, QApplication, QMainWindow, QToolBar, QLineEdit, QPushButton, QVBoxLayout, QWidget, QTabWidget, QDialog, QTableWidget, QTableWidgetItem, QMenu, QAction, QComboBox, QLabel, QProgressBar, QCheckBox)
 from PyQt5.QtCore import QUrl, Qt, QSettings, QTimer
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QToolBar, QLineEdit, QPushButton, QVBoxLayout, QWidget, QTabWidget, QDialog, QTableWidget, QTableWidgetItem,QHBoxLayout, QMessageBox, QMenu, QAction)
-from PyQt5.QtWebEngineWidgets import (QWebEngineView, QWebEngineProfile, QWebEngineSettings, QWebEnginePage)
-from PyQt5.QtGui import QIcon, QColor, QCursor
+from PyQt5.QtWebEngineWidgets import (QWebEngineView, QWebEngineProfile, QWebEngineSettings, QWebEnginePage, QWebEngineDownloadItem)
+from PyQt5.QtGui import QIcon, QColor, QCursor, QPalette
 
 
 class CustomWebEngineView(QWebEngineView):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, is_incognito=False):
         super().__init__(parent)
         self.browser = None
         self.current_link = None
+        
+        if is_incognito:
+            self.profile = QWebEngineProfile()
+            self.profile.setHttpCacheType(QWebEngineProfile.NoCache)
+            self.profile.setPersistentStoragePath("")
+            self.page().setProfile(self.profile)
+        else:
+            self.profile = QWebEngineProfile.defaultProfile()
+
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.prepare_context_menu)
 
@@ -33,7 +41,7 @@ class CustomWebEngineView(QWebEngineView):
 
         back_action = context_menu.addAction("Back")
         back_action.triggered.connect(self.back)
-
+    
         forward_action = context_menu.addAction("Forward")
         forward_action.triggered.connect(self.forward)
 
@@ -228,6 +236,44 @@ class CustomWebPage(QWebEnginePage):
     def createWindow(self, _type):
         return self.view().browser.create_new_tab()
 
+class DownloadItem(QWidget):
+    def __init__(self, download):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        
+        self.download = download
+        
+        filename_label = QLabel(download.suggestedFileName())
+        layout.addWidget(filename_label)
+        
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+        
+        download.downloadProgress.connect(self.update_progress)
+        download.finished.connect(self.download_finished)
+        
+    def update_progress(self, received, total):
+        if total > 0:
+            self.progress_bar.setValue(int((received / total) * 100))
+    
+    def download_finished(self):
+        self.progress_bar.setValue(100)
+
+class DownloadManager(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Download Manager")
+        self.resize(500, 300)
+        
+        layout = QVBoxLayout(self)
+        self.downloads_layout = QVBoxLayout()
+        layout.addLayout(self.downloads_layout)
+    
+    def add_download(self, download):
+        download_item = DownloadItem(download)
+        self.downloads_layout.addWidget(download_item)
+        self.show()
+
 class WebBrowser(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -253,6 +299,16 @@ class WebBrowser(QMainWindow):
         self.refresh_btn.clicked.connect(self.refresh_page)
         nav_toolbar.addWidget(self.refresh_btn)
         
+        new_tab_btn = QPushButton("+")
+        new_tab_btn.clicked.connect(self.add_new_tab)
+        nav_toolbar.addWidget(new_tab_btn)
+        
+        self.search_engine_combo = QComboBox()
+        search_engines = ["Google", "Bing", "DuckDuckGo"]
+        self.search_engine_combo.addItems(search_engines)
+        nav_toolbar.addWidget(QLabel("Search:"))
+        nav_toolbar.addWidget(self.search_engine_combo)
+        
         self.url_bar = QLineEdit()
         self.url_bar.returnPressed.connect(self.navigate_to_url)
         nav_toolbar.addWidget(self.url_bar)
@@ -261,26 +317,122 @@ class WebBrowser(QMainWindow):
         self.bookmark_btn.clicked.connect(self.toggle_bookmark)
         nav_toolbar.addWidget(self.bookmark_btn)
         
-        bookmark_manager_btn = QPushButton("Bookmark Manager")
-        bookmark_manager_btn.clicked.connect(self.view_bookmark_manager)
-        nav_toolbar.addWidget(bookmark_manager_btn)
+        bookmarks_manager_btn = QPushButton("Bookmarks")
+        bookmarks_manager_btn.clicked.connect(self.view_bookmark_manager)
+        nav_toolbar.addWidget(bookmarks_manager_btn)
         
         history_btn = QPushButton("History")
         history_btn.clicked.connect(self.view_history)
         nav_toolbar.addWidget(history_btn)
         
+        self.incognito_checkbox = QCheckBox("Incognito")
+        self.incognito_checkbox.stateChanged.connect(self.on_incognito_state_changed)
+        nav_toolbar.addWidget(self.incognito_checkbox)
+        
+        download_btn = QPushButton("Downloads")
+        download_btn.clicked.connect(self.show_download_manager)
+        nav_toolbar.addWidget(download_btn)
+        
+        reopen_tab_btn = QPushButton("↩ Reopen Tab")
+        reopen_tab_btn.clicked.connect(self.reopen_last_tab)
+        nav_toolbar.addWidget(reopen_tab_btn)
+        
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.tabs.setCornerWidget(self.create_new_tab_button())
-        
-        self.add_new_tab()
         
         main_layout.addWidget(self.tabs)
         
         central_widget = QWidget()
         central_widget.setLayout(main_layout)
         self.setCentralWidget(central_widget)
+        
+        self.download_manager = DownloadManager(self)
+        
+        self.closed_tabs = []
+        
+        self.add_new_tab()
+    
+    def on_incognito_state_changed(self, state):
+        current_tab = self.tabs.currentWidget()
+        if state == Qt.Checked:
+            current_tab.page().setProfile(
+                QWebEngineProfile.defaultProfile().createOffTheRecordProfile()
+            )
+        else:
+            current_tab.page().setProfile(QWebEngineProfile.defaultProfile())
+    
+    def navigate_to_url(self):
+        current_web_view = self.tabs.currentWidget()
+        url = self.url_bar.text()
+        
+        if not url.startswith(('http://', 'https://')):
+            search_engine = self.search_engine_combo.currentText()
+            if search_engine == "Google":
+                url = f'https://www.google.com/search?q={url}'
+            elif search_engine == "Bing":
+                url = f'https://www.bing.com/search?q={url}'
+            elif search_engine == "DuckDuckGo":
+                url = f'https://duckduckgo.com/?q={url}'
+        
+        current_web_view.load(QUrl(url))
+
+    def handle_download(self, download):
+        download_path = os.path.expanduser("~/Downloads")
+        os.makedirs(download_path, exist_ok=True)
+        
+        download.setDownloadDirectory(download_path)
+        download.accept()
+        
+        self.download_manager.add_download(download)
+    
+    def show_download_manager(self):
+        self.download_manager.show()
+
+    def toggle_dark_mode(self):
+        app = QApplication.instance()
+        if app.styleSheet() == "":
+            app.setStyleSheet("""
+                QWidget {
+                    background-color: #2b2b2b;
+                    color: white;
+                }
+                QLineEdit, QTableWidget {
+                    background-color: #3c3f41;
+                    color: white;
+                }
+            """)
+            for i in range(self.tabs.count()):
+                web_view = self.tabs.widget(i)
+                web_view.settings().setAttribute(
+                    QWebEngineSettings.ForceDarkMode, True
+                )
+        else:
+            app.setStyleSheet("")
+            for i in range(self.tabs.count()):
+                web_view = self.tabs.widget(i)
+                web_view.settings().setAttribute(
+                    QWebEngineSettings.ForceDarkMode, False
+                )
+
+    def toggle_incognito_mode(self):
+        current_web_view = self.tabs.currentWidget()
+        profile = current_web_view.page().profile()
+        if profile.persistentStoragePath():
+            incognito_profile = QWebEngineProfile.defaultProfile()
+            incognito_profile.setHttpCacheType(QWebEngineProfile.NoCache)
+            incognito_profile.setPersistentStoragePath("")
+            current_web_view.page().setProfile(incognito_profile)
+            self.incognito_btn.setText("🕶️💡")  
+        else:
+            current_web_view.page().setProfile(QWebEngineProfile.defaultProfile())
+            self.incognito_btn.setText("🕶️")
+
+    def reopen_last_tab(self):
+        if self.closed_tabs:
+            last_tab = self.closed_tabs.pop()
+            new_tab = self.add_new_tab(last_tab['url'])
+            new_tab.setWindowTitle(last_tab.get('title', 'Reopened Tab'))
     
     def init_database(self):
         self.conn = sqlite3.connect('browser_data.db')
@@ -304,35 +456,29 @@ class WebBrowser(QMainWindow):
         return new_tab_btn
     
     def add_new_tab(self, url=None):
-        web_view = CustomWebEngineView()
-
-        custom_page = CustomWebPage(web_view)
-        custom_page.browser = self
-        web_view.setPage(custom_page)
-
-        web_view.settings().setAttribute(QWebEngineSettings.JavascriptEnabled, True)
-
-        profile = web_view.page().profile()
-        profile.downloadRequested.connect(self.handle_download)
-
+        is_incognito = self.incognito_checkbox.isChecked()
+        
+        web_view = CustomWebEngineView(parent=self, is_incognito=is_incognito)
+        
+        web_view.browser = self
         web_view.urlChanged.connect(self.update_url_bar)
         web_view.titleChanged.connect(self.update_tab_title)
-
-        web_view.setContextMenuPolicy(Qt.CustomContextMenu)
-
+        
+        web_view.page().profile().downloadRequested.connect(self.handle_download)
+        
+        if is_incognito:
+            web_view.page().setProfile(
+                QWebEngineProfile.defaultProfile().createOffTheRecordProfile()
+            )
+        
         if url:
             web_view.load(QUrl(url))
         else:
             web_view.load(QUrl("https://www.google.com"))
-
+        
         tab_index = self.tabs.addTab(web_view, "New Tab")
         self.tabs.setCurrentIndex(tab_index)
-
-        if url:
-            self.add_to_history(web_view.title(), url)
-
-        self.update_bookmark_button()
-
+        
         return web_view
     
     def create_new_tab(self):
@@ -351,7 +497,13 @@ class WebBrowser(QMainWindow):
         url = self.url_bar.text()
         
         if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+            search_engine = self.search_engine_combo.currentText()
+            if search_engine == "Google":
+                url = f'https://www.google.com/search?q={url}'
+            elif search_engine == "Bing":
+                url = f'https://www.bing.com/search?q={url}'
+            elif search_engine == "DuckDuckGo":
+                url = f'https://duckduckgo.com/?q={url}'
         
         current_web_view.load(QUrl(url))
     
@@ -380,6 +532,13 @@ class WebBrowser(QMainWindow):
     
     def close_tab(self, index):
         web_view = self.tabs.widget(index)
+        
+        if not web_view.page().profile().isOffTheRecord():
+            self.closed_tabs.append({
+                'url': web_view.url().toString(),
+                'title': web_view.title()
+            })
+        
         web_view.page().runJavaScript("document.querySelectorAll('video, audio').forEach(media => media.pause());")
         
         self.tabs.removeTab(index)
@@ -425,13 +584,14 @@ class WebBrowser(QMainWindow):
         bookmark_manager.exec_()
         
     def add_to_history(self, title, url):
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("INSERT INTO history (title, url) VALUES (?, ?)", 
-                       (title, url))
-            self.conn.commit()
-        except sqlite3.Error as e:
-            print(f"Error adding to history: {e}")
+        if not self.incognito_checkbox.isChecked():
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("INSERT INTO history (title, url) VALUES (?, ?)", 
+                           (title, url))
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f"Error adding to history: {e}")
     
     def view_history(self):
         history_viewer = HistoryViewer(self.conn, self)
@@ -458,7 +618,6 @@ class WebBrowser(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     browser = WebBrowser()
-
     browser.show()
     sys.exit(app.exec_())
 
